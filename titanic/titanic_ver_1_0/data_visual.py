@@ -7,8 +7,10 @@ df = pd.read_csv("../data_file/train.csv")
 
 # 1. Create child-only dataframe
 children = df[df["Age"] < 16].copy()
+adult = df[df["Age"] > 16].copy() # Similarly for adults
 
 # 2. Create custom age groups
+#Child Group
 bins_child = [0, 2, 3, 5, 7, 10, 13, 16]
 labels_child = ["0-2", "2-3", "3-5", "5-7", "7-10", "10-13", "13-16"]
 
@@ -16,6 +18,16 @@ children["Child_AgeGroup"] = pd.cut(
     children["Age"],
     bins=bins_child,
     labels=labels_child,
+    right=False
+)
+#Adult Group
+bins_adult = [16, 19, 21, 25, 30, 35, 40, 45, 50, 60,90]
+labels_adult = ["16-19", "19-21", "21-25", "25-30","30-35", "35-40", "40-45", "45-50","50-60", "65+"]
+
+adult["Adult_AgeGroup"] = pd.cut(
+    adult["Age"],
+    bins=bins_adult,
+    labels=labels_adult,
     right=False
 )
 
@@ -38,6 +50,7 @@ def plot_count_survived_dead(data, column):
     plt.tight_layout()
     plt.show()
 
+plot_count_survived_dead(adult, "Adult_AgeGroup")
 plot_count_survived_dead(children, "Child_AgeGroup")
 plot_count_survived_dead(df, "SibSp")
 plot_count_survived_dead(df, "Parch")
