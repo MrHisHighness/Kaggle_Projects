@@ -24,6 +24,15 @@ Core_para_df["Deck"] = ""
 Core_para_df["Deck_Source"] = ""
 Core_para_df["FamilySize"] = ""
 Core_para_df["FamilyId"] = ""
+Core_para_df["FamilyLink_Source"] = ""
+
+# Extract numeric part of ticket
+super_file_df["Ticket_Number"] = (
+    super_file_df["Ticket"]
+    .astype(str)
+    .str.extract(r"(\d+)")
+    .astype(float)
+)
 
 
 # Extract title for age/family/social category analysis
@@ -41,9 +50,109 @@ Core_para_df["Title"] = clean_file_df["Name"].str.extract(r",\s*([^\.]+)\.")
 Core_para_df["Surname"] = clean_file_df["Name"].str.extract(r"^([^,]+)") # Core file
 super_file_df["Surname"] = super_file_df["Name"].str.extract(r"^([^,]+)") # super file
 
+
 # Family Size
 Core_para_df["FamilySize"] = clean_file_df["SibSp"] + clean_file_df["Parch"] + 1
 super_file_df["FamilySize"] = super_file_df["SibSp"] + super_file_df["Parch"] + 1
+super_file_df["FamilyLink_Source"] = pd.NA
+
+## Source 1/2: same Ticket, same Surname
+## FamilyId stays common for the whole Ticket+Surname group.
+## If the group has only one FamilySize value, source = 1.
+## If the group has different FamilySize values, source = 2.
+ticket_surname_key = ["Ticket", "Surname"]
+ticket_surname_group_size = super_file_df.groupby(ticket_surname_key)["PassengerId"].transform("count")
+ticket_surname_family_size_count = super_file_df.groupby(ticket_surname_key)["FamilySize"].transform("nunique")
+
+ticket_surname_family = ticket_surname_group_size > 1
+level_1_family = ticket_surname_family & (ticket_surname_family_size_count == 1)
+level_2_family = ticket_surname_family & (ticket_surname_family_size_count > 1)
+
+super_file_df.loc[ticket_surname_family, "FamilyId"] = (
+    "F_" + super_file_df.loc[ticket_surname_family, ticket_surname_key].astype(str).agg("_".join, axis=1)
+)
+super_file_df.loc[level_1_family, "FamilyLink_Source"] = "1"
+super_file_df.loc[level_2_family, "FamilyLink_Source"] = "2"
+
+
+## Source 3: same Surname, same Pclass, same Embarked, nearby Ticket number
+## This is weaker than Ticket+Surname, so we only use it for still-unlinked passengers
+## who have FamilySize > 1 and nearby numeric ticket numbers.
+
+# Extract numeric part from Ticket
+super_file_df["Ticket_Number"] = (
+    super_file_df["Ticket"]
+    .astype(str)
+    .str.extract(r"(\d+)")
+    .astype(float)
+)
+
+level_3_family_key = ["Surname", "Pclass", "Embarked"]
+
+level_3_candidates = super_file_df[
+    super_file_df["FamilyId"].isna()
+    & (super_file_df["FamilySize"] > 1)
+    & (super_file_df["Ticket_Number"].notna())
+].copy()
+
+level_3_candidates = level_3_candidates.sort_values(
+    level_3_family_key + ["Ticket_Number"]
+)
+
+level_3_candidates["Prev_Ticket_Diff"] = (
+    level_3_candidates
+    .groupby(level_3_family_key)["Ticket_Number"]
+    .diff()
+    .abs()
+)
+
+level_3_candidates["Next_Ticket_Diff"] = (
+    level_3_candidates
+    .groupby(level_3_family_key)["Ticket_Number"]
+    .diff(-1)
+    .abs()
+)
+
+level_3_candidates["Near_Ticket"] = (
+    level_3_candidates["Prev_Ticket_Diff"].le(2)
+    | level_3_candidates["Next_Ticket_Diff"].le(2)
+)
+
+level_3_family = level_3_candidates["Near_Ticket"].reindex(
+    super_file_df.index,
+    fill_value=False
+)
+
+super_file_df.loc[level_3_family, "FamilyId"] = (
+    "F3_" +
+    super_file_df.loc[level_3_family, level_3_family_key]
+    .astype(str)
+    .agg("_".join, axis=1)
+)
+
+super_file_df.loc[level_3_family, "FamilyLink_Source"] = "3"
+
+
+
+## Source 4: no linked family found
+## FamilySize == 1 means truly alone.
+## FamilySize > 1 means family exists, but exact family members are unknown.
+level_4_family = super_file_df["FamilyId"].isna()
+super_file_df.loc[level_4_family, "FamilyLink_Source"] = "4"
+
+level_4_alone = level_4_family & (super_file_df["FamilySize"] == 1)
+level_4_unknown_family = level_4_family & (super_file_df["FamilySize"] > 1)
+
+super_file_df.loc[level_4_alone, "FamilyId"] = "Alone"
+super_file_df.loc[level_4_unknown_family, "FamilyId"] = "Unknown_Family"
+
+
+## Bring FamilyId and FamilyLink_Source back into Core_para_df
+family_link_map = super_file_df.set_index("PassengerId")["FamilyId"]
+family_source_map = super_file_df.set_index("PassengerId")["FamilyLink_Source"]
+
+Core_para_df["FamilyId"] = Core_para_df["PassengerId"].map(family_link_map)
+Core_para_df["FamilyLink_Source"] = Core_para_df["PassengerId"].map(family_source_map)
 
 # Deck Prediction
 
@@ -53,10 +162,11 @@ Core_para_df["Deck"] = clean_file_df["Cabin"].str[0]
 known_deck = Core_para_df["Deck"].notna()
 Core_para_df.loc[known_deck, "Deck_Source"] = "1"
 
+
 ## Prediction using same ticket no Deck Level 2
+
 ### Create plain deck letter in combined train+test dataframe
 super_file_df["Deck_Letter"] = super_file_df["Cabin"].str[0]
-
 ### Build Ticket -> Deck_Letter map from all known cabins in train+test
 ticket_deck_map = (
     super_file_df
@@ -67,15 +177,12 @@ ticket_deck_map = (
 
 ### Find train rows where Deck is still missing
 missing_deck = Core_para_df["Deck"].isna()
-
 ### Infer deck from ticket map
 ticket_inferred_deck = Core_para_df["Ticket"].map(ticket_deck_map)
-
 ### Fill only missing decks where ticket inference exists
-level_2_deck = missing_deck & ticket_inferred_deck.notna()
-
-Core_para_df.loc[level_2_deck, "Deck"] = ticket_inferred_deck.loc[level_2_deck]
-Core_para_df.loc[level_2_deck, "Deck_Source"] = "2"
+level_2_deck = missing_deck & ticket_inferred_deck.notna() #intersection of still missing and ticket inferred deck
+Core_para_df.loc[level_2_deck, "Deck"] = ticket_inferred_deck.loc[level_2_deck] # where level_2_deck true-> load ticket inferred deck
+Core_para_df.loc[level_2_deck, "Deck_Source"] = "2" # Where level 2 intersection true-> load "2" in Deck_Source
 
 
 
