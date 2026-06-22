@@ -1,5 +1,6 @@
 import pandas as pd
-
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", 200)
 file_input = "train" # Change Train/Test Here
 # Fetch Train/Test Data
 clean_file_df = pd.read_csv(f"../data_file/{file_input}.csv")
@@ -19,7 +20,7 @@ super_file_df = pd.concat([clean_file_df, clean_opp_df], ignore_index=True)
 super_file_df.to_csv("modified_source/super_file.csv", index=False)
 
 # Create Base Core Train Parameter CSV [ Pclass + Sex + Age + Deck + Dependents + Family Id + Ticket]
-Core_para_df = clean_file_df[["PassengerId", "Pclass", "Name", "Sex", "Age", "Ticket"]]
+Core_para_df = clean_file_df[["PassengerId", "Pclass", "Name", "Sex", "Age", "Ticket", "Fare", "Embarked"]]
 Core_para_df["Deck"] = ""
 Core_para_df["Deck_Source"] = ""
 Core_para_df["FamilySize"] = ""
@@ -61,8 +62,8 @@ super_file_df["FamilyLink_Source"] = pd.NA
 ## If the group has only one FamilySize value, source = 1.
 ## If the group has different FamilySize values, source = 2.
 ticket_surname_key = ["Ticket", "Surname"]
-ticket_surname_group_size = super_file_df.groupby(ticket_surname_key)["PassengerId"].transform("count")
-ticket_surname_family_size_count = super_file_df.groupby(ticket_surname_key)["FamilySize"].transform("nunique")
+ticket_surname_group_size = super_file_df.groupby(ticket_surname_key)["PassengerId"].transform("count") # count no of members sharing ticket and surname
+ticket_surname_family_size_count = super_file_df.groupby(ticket_surname_key)["FamilySize"].transform("nunique") # count no of unique family sizes
 
 ticket_surname_family = ticket_surname_group_size > 1
 level_1_family = ticket_surname_family & (ticket_surname_family_size_count == 1)
@@ -185,8 +186,83 @@ Core_para_df.loc[level_2_deck, "Deck"] = ticket_inferred_deck.loc[level_2_deck] 
 Core_para_df.loc[level_2_deck, "Deck_Source"] = "2" # Where level 2 intersection true-> load "2" in Deck_Source
 
 
+# Fare Cleaning + Pclass-specific FareBand
+
+## Use existing Deck_Letter if already created, otherwise create it
+if "Deck_Letter" not in super_file_df.columns:
+    super_file_df["Deck_Letter"] = super_file_df["Cabin"].str[0]
+
+## FarePerPerson prevents group-ticket fares from overpowering the signal
+super_file_df["FarePerPerson"] = super_file_df["Fare"] / super_file_df["FamilySize"]
+
+
+## Fill missing FarePerPerson from strongest to weakest grouping
+fare_fill_levels = [
+    (["Embarked", "Pclass", "Deck_Letter"], "2"),
+    (["Embarked", "Pclass"], "3"),
+    (["Pclass"], "4"),
+]
+
+for fare_keys, fare_source in fare_fill_levels:
+    missing_fare = super_file_df["FarePerPerson"].isna()
+
+    fare_fill_value = (
+        super_file_df
+        .groupby(fare_keys)["FarePerPerson"]
+        .transform("median")
+    )
+
+    fillable_fare = missing_fare & fare_fill_value.notna()
+
+    super_file_df.loc[fillable_fare, "FarePerPerson"] = fare_fill_value.loc[fillable_fare]
+    super_file_df.loc[fillable_fare, "Fare_Source"] = fare_source
+
+
+## Final emergency fallback
+missing_fare = super_file_df["FarePerPerson"].isna()
+super_file_df.loc[missing_fare, "FarePerPerson"] = super_file_df["FarePerPerson"].median()
+super_file_df.loc[missing_fare, "Fare_Source"] = "5"
+
+# Pclass-specific FareBand
+# This avoids FareBand simply becoming another copy of Pclass.
+
+def create_pclass_fare_band(fare_series):
+    fare_band_code = pd.qcut(
+        fare_series,
+        q=3,
+        labels=False,
+        duplicates="drop"
+    )
+
+    return fare_band_code.map({
+        0: "LowFare",
+        1: "MidFare",
+        2: "HighFare"
+    })
+
+
+super_file_df["FareBand_Level"] = (
+    super_file_df
+    .groupby("Pclass", group_keys=False)["FarePerPerson"]
+    .apply(create_pclass_fare_band)
+)
+
+super_file_df["FareBand"] = (
+    "P"
+    + super_file_df["Pclass"].astype(str)
+    + "_"
+    + super_file_df["FareBand_Level"].astype(str)
+)
+fare_per_person_map = super_file_df.set_index("PassengerId")["FarePerPerson"]
+fare_band_map = super_file_df.set_index("PassengerId")["FareBand"]
+
+Core_para_df["FarePerPerson"] = Core_para_df["PassengerId"].map(fare_per_person_map)
+Core_para_df["FareBand"] = Core_para_df["PassengerId"].map(fare_band_map)
+
 
 # Save Core Para CSV
-Core_para_df.to_csv(f"modified_source/Core_{file_input}_para.csv", index=False)
+print(Core_para_df.columns)
 print(Core_para_df.head())
+Core_para_df.to_csv(f"modified_source/Core_{file_input}_para.csv", index=False)
+
 

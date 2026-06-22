@@ -1,9 +1,9 @@
-Category	Meaning
-A1	Deck directly known from Cabin
-A2	Deck inferred from same Ticket group
-A3	Deck inferred from same Surname/FamilyKey
-A4	Deck inferred from Pclass + FarePerPerson + Embarked
-A_unknown	Not enough signal
+Deck | Source |	Meaning
+A | 1 |	Deck directly known from Cabin
+A | 2 |	Deck inferred from same Ticket group
+A | 3 |	Deck inferred from same Surname/FamilyKey
+A | 4 |	Deck inferred from Pclass + FarePerPerson + Embarked
+A | unknown	| Not enough signal
 
 ## Deck Feature
 Many passengers have missing cabin data, so after extracting the known decks, I used the combined train + test file as a broader reference table.
