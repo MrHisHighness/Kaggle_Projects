@@ -7,7 +7,7 @@ df = pd.read_csv("../data_file/train.csv")
 
 # 1. Create child-only dataframe
 children = df[df["Age"] < 16].copy()
-adult = df[df["Age"] > 16].copy() # Similarly for adults
+adult = df[df["Age"] >= 16].copy() # Similarly for adults
 
 # 2. Create custom age groups
 # Child Group
@@ -37,6 +37,7 @@ df["FamilySize"] = df["SibSp"] + df["Parch"] + 1
 #groupby - groups dataframe as "SibSp:0 SibSp:1 .. etc"
 #.agg() generates summary statistics
 def plot_count_survived_dead(data, column, compare_by = None):
+    # Optional comparision with Sex parameter feature
     if compare_by:
         group_columns = [column, compare_by]
     else:
@@ -59,7 +60,7 @@ def plot_count_survived_dead(data, column, compare_by = None):
     plt.show()
 
 plot_count_survived_dead(adult, "Adult_AgeGroup")
-plot_count_survived_dead(children, "Child_AgeGroup", compare_by="Sex")
+plot_count_survived_dead(children, "Child_AgeGroup", compare_by="Sex") # With optional Sex comparision
 plot_count_survived_dead(df, "FamilySize")
 
 
