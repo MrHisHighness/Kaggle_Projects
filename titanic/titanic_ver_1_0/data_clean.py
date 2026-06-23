@@ -47,6 +47,8 @@ super_file_df["Ticket_Number"] = (
 # ([^\.]+) -> capture all characters until the period
 # \.       -> stop at the title period
 Core_para_df["Title"] = clean_file_df["Name"].str.extract(r",\s*([^\.]+)\.")
+super_file_df["Title"] = super_file_df["Name"].str.extract(r",\s*([^\.]+)\.")
+
 
 # Extract Surname for Family Linking
 # Regex breakdown:
@@ -84,13 +86,6 @@ super_file_df.loc[level_2_family, "FamilyLink_Source"] = "2"
 ## This is weaker than Ticket+Surname, so we only use it for still-unlinked passengers
 ## who have FamilySize > 1 and nearby numeric ticket numbers.
 
-# Extract numeric part from Ticket
-super_file_df["Ticket_Number"] = (
-    super_file_df["Ticket"]
-    .astype(str)
-    .str.extract(r"(\d+)")
-    .astype(float)
-)
 
 level_3_family_key = ["Surname", "Pclass", "Embarked"]
 
@@ -418,6 +413,240 @@ if still_missing.any():
 # Deck T appears only once, so merge it into A instead of keeping a one-row category.
 Core_para_df["Deck"] = Core_para_df["Deck"].replace("T", "A")
 
+# ==============================================================================
+# Age Filling Logic (Corrected & Progressive)
+# ==============================================================================
+
+def assign_generational_role(row):
+    title = str(row["Title"]).strip()
+    sibsp = row["SibSp"]
+    parch = row["Parch"]
+
+    if title == "Master":
+        return "Master_with_Parents" if parch > 0 else "Master_Alone"
+
+    if title == "Miss":
+        if parch > 0 and sibsp > 0:
+            return "Miss_Child_with_Family"
+        elif parch > 0 and sibsp == 0:
+            return "Miss_Single_Parent_Child"
+        elif parch == 0 and sibsp > 0:
+            return "Miss_With_Sibling_or_Spouse"
+        else:
+            return "Miss_Independent"
+
+    if title == "Mrs":
+        return "Mrs_Mother" if parch > 0 else "Mrs_Wife"
+
+    if title == "Mr":
+        if parch > 0:
+            return "Mr_Father"
+        elif sibsp > 0:
+            return "Mr_Husband_or_Brother"
+        else:
+            return "Mr_Bachelor"
+
+    return "Other_Title"
+
+# Double check that SibSp and Parch exist cleanly before processing
+super_file_df["Age_Role"] = super_file_df.apply(assign_generational_role, axis=1)
+
+# Initialize progressive imputation arrays
+super_file_df["Age_Filled"] = super_file_df["Age"]
+super_file_df["Age_Source"] = pd.NA
+
+# Establish known baseline records
+known_age = super_file_df["Age"].notna()
+super_file_df.loc[known_age, "Age_Source"] = "0"
+
+age_fill_levels = [
+    (["Pclass", "Age_Role"], "1"),
+    (["Age_Role"], "2"),
+    (["Pclass", "Title"], "3"),
+    (["Title"], "4"),
+]
+
+for age_keys, age_source in age_fill_levels:
+    missing_age = super_file_df["Age_Filled"].isna()
+
+    if not missing_age.any():
+        break
+
+    # FIX: Calculate median dynamically using "Age_Filled" to pass along previous iterations
+    age_fill_value = (
+        super_file_df
+        .groupby(age_keys)["Age_Filled"]
+        .transform("median")
+    )
+
+    fillable_age = missing_age & age_fill_value.notna()
+
+    super_file_df.loc[fillable_age, "Age_Filled"] = age_fill_value.loc[fillable_age]
+    super_file_df.loc[fillable_age, "Age_Source"] = age_source
+
+# Final emergency structural fallback
+missing_age = super_file_df["Age_Filled"].isna()
+
+if missing_age.any():
+    # FIX: Default to clean progressive median rather than raw missing median
+    super_file_df.loc[missing_age, "Age_Filled"] = super_file_df["Age_Filled"].median()
+    super_file_df.loc[missing_age, "Age_Source"] = "5"
+
+# Map processed features smoothly back to Core_para_df
+age_filled_map = super_file_df.set_index("PassengerId")["Age_Filled"]
+age_source_map = super_file_df.set_index("PassengerId")["Age_Source"]
+age_role_map = super_file_df.set_index("PassengerId")["Age_Role"]
+
+Core_para_df["Age"] = Core_para_df["PassengerId"].map(age_filled_map)
+Core_para_df["Age_Source"] = Core_para_df["PassengerId"].map(age_source_map)
+Core_para_df["Age_Role"] = Core_para_df["PassengerId"].map(age_role_map)
+
+# Sex-specific statistical age groups
+# These bins were derived separately for female and male passengers using below commented code:
+"""
+import numpy as np
+
+from sklearn.tree import DecisionTreeClassifier
+
+
+# Load data and remove rows where Age is missing for bin calculation
+
+df_clean = df.dropna(subset=["Age"]).copy()
+
+
+# --- SEX-SPECIFIC CHILD + ADULT TREE BINNING ---
+
+def extract_tree_cuts(tree):
+    cuts = tree.tree_.threshold[tree.tree_.threshold != -2]
+    cuts = sorted(np.round(cuts, 1))
+    return cuts
+
+
+def create_age_bins_for_sex(df_clean, sex, child_age_limit=16):
+    sex_df = df_clean[df_clean["Sex"] == sex].copy()
+
+    child_df = sex_df[sex_df["Age"] <= child_age_limit].copy()
+    adult_df = sex_df[sex_df["Age"] > child_age_limit].copy()
+
+    # --- CHILDREN SECTION ---
+    # Smaller min_samples_leaf allows finer child bins.
+    child_tree = DecisionTreeClassifier(
+        max_leaf_nodes=12,
+        min_samples_leaf=3,
+        random_state=42
+    )
+
+    child_tree.fit(child_df[["Age"]], child_df["Survived"])
+    child_cuts = extract_tree_cuts(child_tree)
+
+    # --- ADULT SECTION ---
+    # Larger min_samples_leaf encourages broader adult bins.
+    adult_tree = DecisionTreeClassifier(
+        max_leaf_nodes=10,
+        min_samples_leaf=20,
+        random_state=42
+    )
+
+    adult_tree.fit(adult_df[["Age"]], adult_df["Survived"])
+    adult_cuts = extract_tree_cuts(adult_tree)
+
+    max_age = float(np.ceil(sex_df["Age"].max()))
+
+    final_bins = sorted(
+        list(set(
+            [0.0] +
+            child_cuts +
+            [float(child_age_limit)] +
+            adult_cuts +
+            [max_age + 1]
+        ))
+    )
+
+    return final_bins, child_tree, adult_tree
+
+
+female_bins, female_child_tree, female_adult_tree = create_age_bins_for_sex(
+    df_clean,
+    sex="female"
+)
+
+male_bins, male_child_tree, male_adult_tree = create_age_bins_for_sex(
+    df_clean,
+    sex="male"
+)
+
+sex_age_bins = {
+    "female": female_bins,
+    "male": male_bins
+}
+
+print("Female Statistical Age Bin Edges:")
+print(female_bins)
+
+print("\nMale Statistical Age Bin Edges:")
+print(male_bins)
+
+
+
+"""
+female_age_bins = [
+    0.0, 1.5, 3.5, 5.5, 7.5, 12.0, 14.8, 15.5,
+    16.0, 21.5, 24.5, 28.5, 32.2, 40.5, 48.5, 64.0
+]
+
+male_age_bins = [
+    0.0, 1.0, 1.5, 2.5, 3.5, 6.5, 8.5, 9.5, 13.0, 15.5,
+    16.0, 20.2, 24.8, 27.5, 30.8, 32.2, 34.8, 36.2,
+    47.5, 53.0, 81.0
+]
+
+female_age_labels = [
+    f"Female_{female_age_bins[i]}_{female_age_bins[i + 1]}"
+    for i in range(len(female_age_bins) - 1)
+]
+
+male_age_labels = [
+    f"Male_{male_age_bins[i]}_{male_age_bins[i + 1]}"
+    for i in range(len(male_age_bins) - 1)
+]
+
+Core_para_df["Sex_Age_Group"] = pd.NA
+
+female_rows = Core_para_df["Sex"].eq("female")
+male_rows = Core_para_df["Sex"].eq("male")
+
+Core_para_df.loc[female_rows, "Sex_Age_Group"] = pd.cut(
+    Core_para_df.loc[female_rows, "Age"],
+    bins=female_age_bins,
+    labels=female_age_labels,
+    include_lowest=True,
+    right=False
+)
+
+Core_para_df.loc[male_rows, "Sex_Age_Group"] = pd.cut(
+    Core_para_df.loc[male_rows, "Age"],
+    bins=male_age_bins,
+    labels=male_age_labels,
+    include_lowest=True,
+    right=False
+)
+
+# Catch exact maximum edge values, since right=False excludes the last edge
+Core_para_df.loc[
+    female_rows & Core_para_df["Sex_Age_Group"].isna(),
+    "Sex_Age_Group"
+] = female_age_labels[-1]
+
+Core_para_df.loc[
+    male_rows & Core_para_df["Sex_Age_Group"].isna(),
+    "Sex_Age_Group"
+] = male_age_labels[-1]
+
+# Age debug
+print("Age missing in super_file_df:", super_file_df["Age"].isna().sum())
+print("Age_Filled missing in super_file_df:", super_file_df["Age_Filled"].isna().sum())
+print("Age missing in Core_para_df:", Core_para_df["Age"].isna().sum())
+print(Core_para_df[["PassengerId", "Age", "Age_Source", "Age_Role"]].head(20))
 
 # Save Core Para CSV
 print(Core_para_df.columns)
