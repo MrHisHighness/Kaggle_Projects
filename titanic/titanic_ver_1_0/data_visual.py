@@ -63,4 +63,90 @@ plot_count_survived_dead(adult, "Adult_AgeGroup")
 plot_count_survived_dead(children, "Child_AgeGroup", compare_by="Sex") # With optional Sex comparision
 plot_count_survived_dead(df, "FamilySize")
 
+import numpy as np
+
+from sklearn.tree import DecisionTreeClassifier
+
+
+# Load data and remove rows where Age is missing for bin calculation
+
+df_clean = df.dropna(subset=["Age"]).copy()
+
+
+# --- SEX-SPECIFIC CHILD + ADULT TREE BINNING ---
+
+def extract_tree_cuts(tree):
+    cuts = tree.tree_.threshold[tree.tree_.threshold != -2]
+    cuts = sorted(np.round(cuts, 1))
+    return cuts
+
+
+def create_age_bins_for_sex(df_clean, sex, child_age_limit=16):
+    sex_df = df_clean[df_clean["Sex"] == sex].copy()
+
+    child_df = sex_df[sex_df["Age"] <= child_age_limit].copy()
+    adult_df = sex_df[sex_df["Age"] > child_age_limit].copy()
+
+    # --- CHILDREN SECTION ---
+    # Smaller min_samples_leaf allows finer child bins.
+    child_tree = DecisionTreeClassifier(
+        max_leaf_nodes=12,
+        min_samples_leaf=3,
+        random_state=42
+    )
+
+    child_tree.fit(child_df[["Age"]], child_df["Survived"])
+    child_cuts = extract_tree_cuts(child_tree)
+
+    # --- ADULT SECTION ---
+    # Larger min_samples_leaf encourages broader adult bins.
+    adult_tree = DecisionTreeClassifier(
+        max_leaf_nodes=10,
+        min_samples_leaf=20,
+        random_state=42
+    )
+
+    adult_tree.fit(adult_df[["Age"]], adult_df["Survived"])
+    adult_cuts = extract_tree_cuts(adult_tree)
+
+    max_age = float(np.ceil(sex_df["Age"].max()))
+
+    final_bins = sorted(
+        list(set(
+            [0.0] +
+            child_cuts +
+            [float(child_age_limit)] +
+            adult_cuts +
+            [max_age + 1]
+        ))
+    )
+
+    return final_bins, child_tree, adult_tree
+
+
+female_bins, female_child_tree, female_adult_tree = create_age_bins_for_sex(
+    df_clean,
+    sex="female"
+)
+
+male_bins, male_child_tree, male_adult_tree = create_age_bins_for_sex(
+    df_clean,
+    sex="male"
+)
+
+sex_age_bins = {
+    "female": female_bins,
+    "male": male_bins
+}
+
+print("Female Statistical Age Bin Edges:")
+print(female_bins)
+
+print("\nMale Statistical Age Bin Edges:")
+print(male_bins)
+
+
+
+
+
 

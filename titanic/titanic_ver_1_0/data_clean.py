@@ -1,7 +1,11 @@
 import pandas as pd
-pd.set_option("display.max_columns", None)
-pd.set_option("display.width", 200)
-file_input = "train" # Change Train/Test Here
+
+
+pd.set_option("display.max_columns", None) # Show all columns when printing a DataFrame.
+pd.set_option("display.width", 200) # Use up to 200 characters of horizontal space before wrapping the display.
+
+
+file_input = "test" # Change Train/Test Here
 # Fetch Train/Test Data
 clean_file_df = pd.read_csv(f"../data_file/{file_input}.csv")
 
@@ -164,26 +168,39 @@ known_deck = Core_para_df["Deck"].notna()
 Core_para_df.loc[known_deck, "Deck_Source"] = "1"
 
 
-## Prediction using same ticket no Deck Level 2
+## Prediction using ticket and sequential surname-ticket logic Deck Level 2/3
 
-### Create plain deck letter in combined train+test dataframe
-super_file_df["Deck_Letter"] = super_file_df["Cabin"].str[0]
-### Build Ticket -> Deck_Letter map from all known cabins in train+test
+# Direct deck from actual Cabin only
+super_file_df["Deck_Letter_Known"] = super_file_df["Cabin"].str[0]
+
+# -----------------------
+# Deck Level 2: exact same ticket
+# -----------------------
+
 ticket_deck_map = (
     super_file_df
-    .dropna(subset=["Deck_Letter"]) # Drop Deck_Letter rows without value
-    .groupby("Ticket")["Deck_Letter"]
-    .agg(lambda x: x.mode()[0]) # For each Ticket group, choose most common known deck letter
+    .dropna(subset=["Deck_Letter_Known"])
+    .groupby("Ticket")["Deck_Letter_Known"]
+    .agg(lambda x: x.mode()[0])
 )
 
-### Find train rows where Deck is still missing
+# Broadcast Level 2 deck knowledge back into super_file_df.
+# This gives Level 3 access to both direct cabin decks and exact-ticket inferred decks.
+super_file_df["Deck_Letter_L2"] = super_file_df["Deck_Letter_Known"].fillna(
+    super_file_df["Ticket"].map(ticket_deck_map)
+)
+
 missing_deck = Core_para_df["Deck"].isna()
-### Infer deck from ticket map
 ticket_inferred_deck = Core_para_df["Ticket"].map(ticket_deck_map)
-### Fill only missing decks where ticket inference exists
-level_2_deck = missing_deck & ticket_inferred_deck.notna() #intersection of still missing and ticket inferred deck
-Core_para_df.loc[level_2_deck, "Deck"] = ticket_inferred_deck.loc[level_2_deck] # where level_2_deck true-> load ticket inferred deck
-Core_para_df.loc[level_2_deck, "Deck_Source"] = "2" # Where level 2 intersection true-> load "2" in Deck_Source
+
+level_2_deck = missing_deck & ticket_inferred_deck.notna()
+
+Core_para_df.loc[level_2_deck, "Deck"] = ticket_inferred_deck.loc[level_2_deck]
+Core_para_df.loc[level_2_deck, "Deck_Source"] = "2"
+
+
+
+
 
 
 # Fare Cleaning + Pclass-specific FareBand
@@ -258,6 +275,148 @@ fare_band_map = super_file_df.set_index("PassengerId")["FareBand"]
 
 Core_para_df["FarePerPerson"] = Core_para_df["PassengerId"].map(fare_per_person_map)
 Core_para_df["FareBand"] = Core_para_df["PassengerId"].map(fare_band_map)
+
+# Deck Prediction Level 3
+# Structural deck inference using Embarked + Pclass + FareBand
+# Only fills when the group has enough known deck evidence and a clear dominant deck.
+
+deck_level_3_keys = ["Embarked", "Pclass", "FareBand"]
+
+deck_level_3_stats = (
+    super_file_df
+    .dropna(subset=["Deck_Letter_L2", "Embarked", "Pclass", "FareBand"])
+    .groupby(deck_level_3_keys)["Deck_Letter_L2"]
+    .agg(
+        Known_Deck_Count="count",
+        Unique_Known_Decks="nunique",
+        Proxy_Deck=lambda x: x.mode()[0],
+        Dominant_Deck_Share=lambda x: x.value_counts(normalize=True).iloc[0]
+    )
+)
+
+valid_level_3_groups = (
+    deck_level_3_stats["Known_Deck_Count"].ge(5)
+    & deck_level_3_stats["Dominant_Deck_Share"].ge(0.65)
+)
+
+deck_level_3_map = deck_level_3_stats.loc[
+    valid_level_3_groups,
+    "Proxy_Deck"
+]
+
+level_3_lookup_index = pd.MultiIndex.from_frame(
+    Core_para_df[deck_level_3_keys]
+)
+
+level_3_inferred_deck = pd.Series(
+    level_3_lookup_index.map(deck_level_3_map),
+    index=Core_para_df.index
+)
+
+level_3_deck = (
+    Core_para_df["Deck"].isna()
+    & level_3_inferred_deck.notna()
+)
+
+Core_para_df.loc[level_3_deck, "Deck"] = level_3_inferred_deck.loc[level_3_deck]
+Core_para_df.loc[level_3_deck, "Deck_Source"] = "3"
+
+# Deck Prediction Level 4
+# Broader structural fallback using controlled hierarchy.
+# This is weaker than Level 3, so each fallback still needs enough evidence.
+
+deck_fallback_levels = [
+    (["Embarked", "Pclass"], "4"),
+    (["Pclass", "FareBand"], "4"),
+]
+
+for deck_fallback_keys, deck_source_value in deck_fallback_levels:
+    missing_deck = Core_para_df["Deck"].isna()
+
+    if not missing_deck.any():
+        break
+
+    deck_fallback_stats = (
+        super_file_df
+        .dropna(subset=["Deck_Letter_L2"] + deck_fallback_keys)
+        .groupby(deck_fallback_keys)["Deck_Letter_L2"]
+        .agg(
+            Known_Deck_Count="count",
+            Proxy_Deck=lambda x: x.mode()[0],
+            Dominant_Deck_Share=lambda x: x.value_counts(normalize=True).iloc[0]
+        )
+    )
+
+    valid_fallback_groups = (
+        deck_fallback_stats["Known_Deck_Count"].ge(5)
+        & deck_fallback_stats["Dominant_Deck_Share"].ge(0.50)
+    )
+
+    deck_fallback_map = deck_fallback_stats.loc[
+        valid_fallback_groups,
+        "Proxy_Deck"
+    ]
+
+    fallback_lookup_index = pd.MultiIndex.from_frame(
+        Core_para_df[deck_fallback_keys]
+    )
+
+    fallback_inferred_deck = pd.Series(
+        fallback_lookup_index.map(deck_fallback_map),
+        index=Core_para_df.index
+    )
+
+    fallback_deck = missing_deck & fallback_inferred_deck.notna()
+
+    Core_para_df.loc[fallback_deck, "Deck"] = fallback_inferred_deck.loc[fallback_deck]
+    Core_para_df.loc[fallback_deck, "Deck_Source"] = deck_source_value
+
+
+# Final fallback Level 5A: Pclass + FareBand
+still_missing = Core_para_df["Deck"].isna()
+
+if still_missing.any():
+    pclass_fareband_fallback_map = (
+        super_file_df
+        .dropna(subset=["Deck_Letter_L2", "Pclass", "FareBand"])
+        .groupby(["Pclass", "FareBand"])["Deck_Letter_L2"]
+        .agg(lambda x: x.mode()[0])
+    )
+
+    level_5a_lookup_index = pd.MultiIndex.from_frame(
+        Core_para_df.loc[still_missing, ["Pclass", "FareBand"]]
+    )
+
+    level_5a_deck = pd.Series(
+        level_5a_lookup_index.map(pclass_fareband_fallback_map),
+        index=Core_para_df.loc[still_missing].index
+    )
+
+    fill_level_5a = still_missing & level_5a_deck.notna()
+
+    Core_para_df.loc[fill_level_5a, "Deck"] = level_5a_deck.loc[fill_level_5a]
+    Core_para_df.loc[fill_level_5a, "Deck_Source"] = "5"
+
+
+# Emergency fallback Level 6: Pclass-only
+still_missing = Core_para_df["Deck"].isna()
+
+if still_missing.any():
+    pclass_fallback_map = (
+        super_file_df
+        .dropna(subset=["Deck_Letter_L2"])
+        .groupby("Pclass")["Deck_Letter_L2"]
+        .agg(lambda x: x.mode()[0])
+    )
+
+    Core_para_df.loc[still_missing, "Deck"] = (
+        Core_para_df.loc[still_missing, "Pclass"].map(pclass_fallback_map)
+    )
+    Core_para_df.loc[still_missing, "Deck_Source"] = "6"
+
+    # Rare deck cleanup
+# Deck T appears only once, so merge it into A instead of keeping a one-row category.
+Core_para_df["Deck"] = Core_para_df["Deck"].replace("T", "A")
 
 
 # Save Core Para CSV
