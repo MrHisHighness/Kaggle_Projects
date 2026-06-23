@@ -5,7 +5,7 @@ pd.set_option("display.max_columns", None) # Show all columns when printing a Da
 pd.set_option("display.width", 200) # Use up to 200 characters of horizontal space before wrapping the display.
 
 
-file_input = "test" # Change Train/Test Here
+file_input = "train" # Change Train/Test Here
 # Fetch Train/Test Data
 clean_file_df = pd.read_csv(f"../data_file/{file_input}.csv")
 
@@ -153,6 +153,44 @@ family_source_map = super_file_df.set_index("PassengerId")["FamilyLink_Source"]
 
 Core_para_df["FamilyId"] = Core_para_df["PassengerId"].map(family_link_map)
 Core_para_df["FamilyLink_Source"] = Core_para_df["PassengerId"].map(family_source_map)
+
+# Family survival/death signal
+# Uses FamilyId as a hidden linking key, but does not feed raw FamilyId directly to ML.
+# For train rows, the passenger's own survival is excluded to avoid leakage.
+# For test rows, only known train survival data is used.
+
+linked_family = ~super_file_df["FamilyId"].isin(["Alone", "Unknown_Family"])
+
+train_family_records = super_file_df[
+    linked_family
+    & super_file_df["Survived"].notna()
+].copy()
+
+family_survive_map = train_family_records.groupby("FamilyId")["Survived"].sum()
+family_known_map = train_family_records.groupby("FamilyId")["Survived"].count()
+family_dead_map = family_known_map - family_survive_map
+
+Core_para_df["Family_survive"] = Core_para_df["FamilyId"].map(family_survive_map).fillna(0)
+Core_para_df["Family_dead"] = Core_para_df["FamilyId"].map(family_dead_map).fillna(0)
+
+# If processing train data, remove the passenger's own result from their family signal.
+if file_input == "train":
+    survived_map = clean_file_df.set_index("PassengerId")["Survived"]
+    own_survived = Core_para_df["PassengerId"].map(survived_map)
+
+    Core_para_df["Family_survive"] = Core_para_df["Family_survive"] - own_survived
+    Core_para_df["Family_dead"] = Core_para_df["Family_dead"] - (1 - own_survived)
+
+    Core_para_df["Family_survive"] = Core_para_df["Family_survive"].clip(lower=0)
+    Core_para_df["Family_dead"] = Core_para_df["Family_dead"].clip(lower=0)
+
+# Alone and unknown-family passengers should not inherit fake shared statistics.
+no_family_signal = Core_para_df["FamilyId"].isin(["Alone", "Unknown_Family"])
+Core_para_df.loc[no_family_signal, ["Family_survive", "Family_dead"]] = 0
+
+Core_para_df["Family_known_count"] = (
+    Core_para_df["Family_survive"] + Core_para_df["Family_dead"]
+)
 
 # Deck Prediction
 
