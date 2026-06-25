@@ -34,9 +34,9 @@ Core_para_df["FamilyLink_Source"] = ""
 # Extract numeric part of ticket
 super_file_df["Ticket_Number"] = (
     super_file_df["Ticket"]
-    .astype(str)
-    .str.extract(r"(\d+)")
-    .astype(float)
+    .astype(str)  # converts into string
+    .str.extract(r"(\d+)") # finds first set of digits
+    .astype(float) # converts back into float
 )
 
 
@@ -71,14 +71,16 @@ ticket_surname_key = ["Ticket", "Surname"]
 ticket_surname_group_size = super_file_df.groupby(ticket_surname_key)["PassengerId"].transform("count") # count no of members sharing ticket and surname
 ticket_surname_family_size_count = super_file_df.groupby(ticket_surname_key)["FamilySize"].transform("nunique") # count no of unique family sizes
 
-ticket_surname_family = ticket_surname_group_size > 1
-level_1_family = ticket_surname_family & (ticket_surname_family_size_count == 1)
-level_2_family = ticket_surname_family & (ticket_surname_family_size_count > 1)
+ticket_surname_family = ticket_surname_group_size > 1 
+level_1_family = ticket_surname_family & (ticket_surname_family_size_count == 1) # Level 1 when no family size difference in member
+level_2_family = ticket_surname_family & (ticket_surname_family_size_count > 1) # Level 2 when different family members have different family size
 
+# Save FamilyId = F + '_' + Ticket + '_' + Surname
 super_file_df.loc[ticket_surname_family, "FamilyId"] = (
     "F_" + super_file_df.loc[ticket_surname_family, ticket_surname_key].astype(str).agg("_".join, axis=1)
 )
-super_file_df.loc[level_1_family, "FamilyLink_Source"] = "1"
+# Find row where level family True, place Source Level
+super_file_df.loc[level_1_family, "FamilyLink_Source"] = "1" 
 super_file_df.loc[level_2_family, "FamilyLink_Source"] = "2"
 
 
@@ -90,9 +92,9 @@ super_file_df.loc[level_2_family, "FamilyLink_Source"] = "2"
 level_3_family_key = ["Surname", "Pclass", "Embarked"]
 
 level_3_candidates = super_file_df[
-    super_file_df["FamilyId"].isna()
+    super_file_df["FamilyId"].isna() # find FamilyId still not filled
     & (super_file_df["FamilySize"] > 1)
-    & (super_file_df["Ticket_Number"].notna())
+    & (super_file_df["Ticket_Number"].notna()) # where Ticket No still exists
 ].copy()
 
 level_3_candidates = level_3_candidates.sort_values(
@@ -102,8 +104,8 @@ level_3_candidates = level_3_candidates.sort_values(
 level_3_candidates["Prev_Ticket_Diff"] = (
     level_3_candidates
     .groupby(level_3_family_key)["Ticket_Number"]
-    .diff()
-    .abs()
+    .diff() # difference from row
+    .abs() # absolute vaue
 )
 
 level_3_candidates["Next_Ticket_Diff"] = (
@@ -112,9 +114,9 @@ level_3_candidates["Next_Ticket_Diff"] = (
     .diff(-1)
     .abs()
 )
-
+# Mark ticket difference less than 2
 level_3_candidates["Near_Ticket"] = (
-    level_3_candidates["Prev_Ticket_Diff"].le(2)
+    level_3_candidates["Prev_Ticket_Diff"].le(2)  
     | level_3_candidates["Next_Ticket_Diff"].le(2)
 )
 
@@ -137,7 +139,7 @@ super_file_df.loc[level_3_family, "FamilyLink_Source"] = "3"
 ## Source 4: no linked family found
 ## FamilySize == 1 means truly alone.
 ## FamilySize > 1 means family exists, but exact family members are unknown.
-level_4_family = super_file_df["FamilyId"].isna()
+level_4_family = super_file_df["FamilyId"].isna() #
 super_file_df.loc[level_4_family, "FamilyLink_Source"] = "4"
 
 level_4_alone = level_4_family & (super_file_df["FamilySize"] == 1)

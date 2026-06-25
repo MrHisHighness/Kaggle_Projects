@@ -1,9 +1,9 @@
 import pandas as pd
 
 from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder
 from sklearn.pipeline import Pipeline
-from sklearn.svm import SVC
+from xgboost import XGBClassifier
 
 # Load Core Train & Test Para files
 train_df = pd.read_csv("modified_source/Core_train_para.csv")
@@ -20,7 +20,6 @@ features_core = [
     "FareBand",
     "Sex_Age_Group",
     "Deck",
-    "Deck_Source",
     "Family_survive",
     "Family_dead",
     "Family_known_count",
@@ -35,7 +34,6 @@ categorical_features = [
     "FareBand",
     "Sex_Age_Group",
     "Deck",
-    "Deck_Source",
     #"FamilyLink_Source",
     "Age_Role",
 ]
@@ -95,21 +93,28 @@ y_train = train_df["Survived"]
 
 X_test = test_df[features_core]
 
-# Preprocess features before modeling: encode categorical labels and scale numeric values.
+# Preprocess features before modeling: encode categorical labels while leaving numeric values as counts/ordered values.
 preprocessor = ColumnTransformer(
     transformers=[
         ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), categorical_features),
-        ("num", StandardScaler(), numeric_features),
+        ("num", "passthrough", numeric_features),
     ],
     sparse_threshold=0
 )
 
-# Model Selection
-model = SVC(
-    C=1.0,
-    gamma="scale",
-    kernel="rbf",
-    random_state=42
+# XGBoost model selection
+model = XGBClassifier(
+    n_estimators=200,
+    max_depth=3,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    min_child_weight=2,
+    reg_lambda=2.0,
+    objective="binary:logistic",
+    eval_metric="logloss",
+    random_state=42,
+    n_jobs=-1
 )
 
 # Wraps your preprocessing and model into one single workflow
